@@ -1,0 +1,82 @@
+name: DevOps/harbor-and-minio-verify
+on:
+  push:
+  workflow_dispatch:
+concurrency:
+  group: "${{ github.ref }}"
+  cancel-in-progress: true
+env:
+  KIUWAN_USER: himanshu.masih@merckgroup.com
+  KIUWAN_PASSWD: Himanshu@123
+  KIUWAN_DOMAIN: 200e3f75a62be294fa687e309199ed2da314705efb739bfda77e77d0c2f532
+  HARBOR_USER: robot$$internal-apps+v2.0
+  HARBOR_PASSWORD: "${{ secrets.HARBOR_PASSWORD }}"
+jobs:
+  Maven:
+    runs-on: ubuntu-latest
+    container:
+      image: maven:3-jdk-8
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 50
+        lfs: true
+    - run: mvn clean install package
+    - uses: actions/upload-artifact@v4.1.0
+      if: success()
+      with:
+        name: "${{ github.job }}"
+        retention-days: 1
+        path: target/culturemediastar.war
+  docker:
+    needs: Maven
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/kaniko-project/executor:debug
+    timeout-minutes: 60
+    env:
+      IMAGE_DEST: dfwpharb01.sial.com/internal-apps/dev
+      DOCKERFILE: Dockerfile
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 50
+        lfs: true
+    - uses: actions/download-artifact@v4.1.0
+    - run: echo "{\"auths\":{\"dfwpharb01.sial.com\":{\"username\":\"$HARBOR_USER\",\"password\":\"$HARBOR_PASSWORD\"}}}" > /kaniko/.docker/config.json
+    - run: IMAGE_TAG=${{ github.ref }}-${{ github.sha }}
+    - run: "/kaniko/executor --context ${{ github.workspace }}/ --dockerfile ${{ github.workspace }}/$DOCKERFILE --destination $IMAGE_DEST:$IMAGE_TAG --cache=true --cache-ttl=12h --skip-tls-verify"
+    - run: echo $IMAGE_TAG>target/image.txt
+    - uses: actions/upload-artifact@v4.1.0
+      if: success()
+      with:
+        name: "${{ github.job }}"
+        path: target/image.txt
+  Harbor-report:
+    needs: docker
+    runs-on: ubuntu-latest
+    container:
+      image: dfwpharb01.sial.com/baseos/alpine:3.19-alpine-secdevops-proxy
+    timeout-minutes: 60
+    env:
+      HarborURL: dfwpharb01.sial.com
+      Project: internal-apps
+      Repo: dev
+      user: robot$$internal-apps+v2.0
+      pass: Z9dcswsktGFwCTbib5ZCs5QdMiena22t
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 50
+        lfs: true
+    - uses: actions/download-artifact@v4.1.0
+    - run: tag=$(cat target/image.txt)
+    - run: export artifact=$tag
+    - run: echo $artifact
+    - run: curl -k -v -u $user:$pass https://$HarborURL/api/v2.0/projects/$Project/repositories/$Repo/artifacts/$artifact/additions/vulnerabilities -o target/image_vulnerabilities_report.json
+    - uses: actions/upload-artifact@v4.1.0
+      if: success()
+      with:
+        name: "${{ github.job }}"
+        path: target/image_vulnerabilities_report.json
